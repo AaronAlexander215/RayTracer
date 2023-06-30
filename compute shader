@@ -1,0 +1,282 @@
+#version 430
+
+struct Light {
+    vec3 position;
+    vec3 forwards;
+    vec3 right;
+    vec3 up;
+};
+
+struct Sphere {
+    vec3 center;
+    float radius;
+    vec3 colour;
+};
+
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct Plane {
+    vec3 center;
+    vec3 tangent;
+    vec3 bitangent;
+    vec3 normal;
+    float uMin;
+    float uMax;
+    float vMin;
+    float vMax;
+    vec3 colour;
+    float reflection;
+};
+
+struct RenderState {
+    float t;
+    vec3 colour;
+    bool hit;
+    vec3 testPoint;
+    vec3 normal;
+    float reflect;
+};
+
+// input/output
+layout(local_size_x = 1, local_size_y = 1) in;
+layout(rgba32f, binding = 0) uniform image2D img_output;
+
+//Scene data
+layout(rgba32f, binding = 1) readonly uniform image2D objects;
+uniform Light viewer;
+uniform float planeCount;
+uniform float sphereCount;
+uniform vec3 ambient;
+uniform vec3 lightCol;
+
+
+vec3 rayTrace(Ray ray);
+vec3 rayReflect(Ray ray, RenderState renderState);
+Plane unpackPlane(int index);
+Sphere unpackSphere(int index);
+RenderState hit(Ray ray, Plane plane, float tMin, float tMax, RenderState renderstate);
+RenderState hit(Ray ray, Sphere sphere, float tMin, float tMax, RenderState renderstate);
+
+
+void main() {
+
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screen_size = imageSize(img_output);
+    float horizontalCoefficient = ((float(pixel_coords.x) * 2 - screen_size.x) / screen_size.x);
+    float verticalCoefficient = ((float(pixel_coords.y) * 2 - screen_size.y) / screen_size.x);
+
+
+    Ray ray;
+    ray.origin = viewer.position;
+    ray.direction = viewer.forwards + horizontalCoefficient * viewer.right + verticalCoefficient * viewer.up;
+
+
+    vec3 pixel = rayTrace(ray);
+   
+    imageStore(img_output, pixel_coords, vec4(pixel,1.0));
+}
+
+vec3 rayTrace(Ray ray) {
+
+    vec3 colour = vec3(0.0);
+    vec3 light = vec3(0.0);
+    
+    float nearestHit = 999999999;
+    bool hitSomething = false;
+    RenderState renderState;
+    
+    for (int i = 0; i < sphereCount; i++) {
+
+        renderState = hit(ray, unpackSphere(i), 0.001, nearestHit, renderState);
+
+        if (renderState.hit) {
+            nearestHit = renderState.t;
+            hitSomething = true;
+        }
+    }
+    
+
+    for (int i = int(sphereCount); i < planeCount + sphereCount; i++){
+    
+       renderState = hit(ray, unpackPlane(i), 0.001, nearestHit, renderState);
+    
+       if (renderState.hit) {
+            nearestHit = renderState.t;
+            hitSomething = true;
+        }
+    }
+        
+    if (hitSomething) {
+
+        Ray reflected;
+        reflected.origin = renderState.testPoint;
+        reflected.direction = reflect(ray.direction, renderState.normal);
+        
+        vec3 add = rayReflect(reflected, renderState);
+        
+        
+        
+        vec3 lightDir = normalize(ray.origin - renderState.normal);
+        vec3 norm = normalize(renderState.normal);
+
+        //apply ambient lighting
+        light += ambient;
+    
+        //apply diffuse lighting
+        light += lightCol * max(0.0,dot(norm,lightDir));
+  
+        colour = renderState.colour * (light + (add * 0.4));
+
+       
+    }
+    //return no colour     
+    return colour;
+    
+}
+
+vec3 rayReflect(Ray ray, RenderState renderState) {
+
+    vec3 additionalLight = vec3(0.0);
+
+    
+    float nearestHit = 999999999;
+    bool hitSomething = false;
+    RenderState renderState2;
+    
+
+    for (int i = 0; i < planeCount ; i++) {
+    
+       renderState2 = hit(ray, unpackPlane(i), 0.001, nearestHit, renderState2);
+    
+       if (renderState2.hit) {
+            nearestHit = renderState2.t;
+            hitSomething = true;
+        }
+    }
+        
+    if (hitSomething && renderState2.reflect == 1) {
+
+        vec3 lightDi = normalize(viewer.position - renderState2.normal);
+        vec3 lightDi2 = reflect(lightDi , renderState2.normal);
+        
+        vec3 norm = normalize(renderState.normal);
+
+        additionalLight += lightCol * max(0.0,dot(norm,lightDi2));
+
+       
+    }
+    //return no colour     
+    return additionalLight;
+    
+}
+
+
+
+
+RenderState hit(Ray ray, Plane plane, float tMin, float tMax, RenderState renderState) {
+    
+    float denom = dot(plane.normal, ray.direction); 
+    
+    if (denom < 0.000001) {
+
+        float t = dot(plane.center - ray.origin, plane.normal) / denom; 
+
+        if (t > tMin && t < tMax) {
+
+            vec3 testPoint = ray.origin + t * ray.direction;
+            vec3 testDirection = testPoint - plane.center;
+
+            float u = dot(testDirection, plane.tangent);
+            float v = dot(testDirection, plane.bitangent);
+
+            if (u > plane.uMin && u < plane.uMax && v > plane.vMin && v < plane.vMax) {
+                renderState.t = t;
+                renderState.colour = plane.colour;
+                renderState.hit = true;
+                renderState.testPoint = plane.center;
+                renderState.normal = plane.normal;
+                renderState.reflect = plane.reflection;
+                return renderState;
+            }
+        }
+    }
+
+    renderState.hit = false;
+    return renderState;
+}
+
+RenderState hit(Ray ray, Sphere sphere, float tMin, float tMax, RenderState renderState) {
+    vec3 co = ray.origin - sphere.center;
+    float a = dot(ray.direction, ray.direction);
+    float b = 2 * dot(ray.direction, co);
+    float c = dot(co, co) - sphere.radius * sphere.radius;
+    float discriminant = b * b - (4 * a * c);
+    
+    if (discriminant > 0.0) {
+
+        float t = (-b - sqrt(discriminant)) / (2 * a);
+
+        if (t > tMin && t < tMax) {
+            renderState.t = t;
+            renderState.colour = sphere.colour;
+            renderState.hit = true;
+            renderState.testPoint = sphere.center;
+            renderState.normal = co;
+            renderState.reflect = 0;
+            return renderState;
+        }
+    }
+
+    renderState.hit = false;
+    return renderState;
+}
+
+
+Plane unpackPlane(int index) {
+
+    // plane: (cx cy cz tx) (ty tz bx by) (bz nx ny nz) (umin umax vmin vmax) (r g b -)
+
+    Plane plane;
+    vec4 attributeChunk = imageLoad(objects, ivec2(0,index));
+    plane.center = attributeChunk.xyz;
+    plane.tangent.x = attributeChunk.w;
+    
+    attributeChunk = imageLoad(objects, ivec2(1,index));
+    plane.tangent.yz = attributeChunk.xy;
+    plane.bitangent.xy = attributeChunk.zw;
+
+    attributeChunk = imageLoad(objects, ivec2(2,index));
+    plane.bitangent.z = attributeChunk.x;
+    plane.normal = attributeChunk.yzw;
+
+    attributeChunk = imageLoad(objects, ivec2(3,index));
+    plane.uMin = attributeChunk.x;
+    plane.uMax = attributeChunk.y;
+    plane.vMin = attributeChunk.z;
+    plane.vMax = attributeChunk.w;
+
+    attributeChunk = imageLoad(objects, ivec2(4,index));
+    plane.colour = attributeChunk.xyz;
+    plane.reflection = attributeChunk.w;
+
+    return plane;
+}
+
+Sphere unpackSphere(int index) {
+
+    // sphere: (cx cy cz r) (r g b -) (- - - -) (- - - -) (- - - -)
+
+    Sphere sphere;
+    vec4 attributeChunk = imageLoad(objects, ivec2(0,index));
+    sphere.center = attributeChunk.xyz;
+    sphere.radius = attributeChunk.w;
+    
+    attributeChunk = imageLoad(objects, ivec2(1,index));
+    sphere.colour = attributeChunk.xyz;
+
+    return sphere;
+}
